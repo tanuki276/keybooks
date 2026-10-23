@@ -3,6 +3,8 @@ package com.tanuki276.keybooks.ui
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -91,7 +93,7 @@ internal fun BackupDialog(database: KeybooksDatabase, crypto: CryptoManager, bio
     AlertDialog(onDismissRequest = { if (!busy) onDismiss() },
         title = { Text("暗号化Export / Import") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Exportには全項目の認証が必要です。鍵が失われる前に実行し、ファイルを端末外に保存してください。")
                 Text("Importは既存データに追加します。復元した全項目はバックアップのパスワードで保護されます。復元後に編集で認証方式を変更できます。")
                 OutlinedTextField(password, { password = it }, enabled = !busy, singleLine = true,
@@ -109,7 +111,15 @@ internal fun BackupDialog(database: KeybooksDatabase, crypto: CryptoManager, bio
                         try {
                             withContext(Dispatchers.IO) {
                                 val bytes = context.contentResolver.openInputStream(uri)?.use {
-                                    it.readNBytes(PortableCrypto.MAX_BYTES + 1)
+                                    val output = java.io.ByteArrayOutputStream()
+                                    val buffer = ByteArray(8192)
+                                    while (true) {
+                                        val count = it.read(buffer)
+                                        if (count == -1) break
+                                        require(output.size() + count <= PortableCrypto.MAX_BYTES) { "File too large" }
+                                        output.write(buffer, 0, count)
+                                    }
+                                    output.toByteArray()
                                 } ?: error("ファイルを開けません")
                                 val plaintext = try { PortableCrypto.open(bytes, supplied) } finally { bytes.fill(0) }
                                 try { database.importPortable(plaintext.toString(Charsets.UTF_8), supplied) }
@@ -134,11 +144,14 @@ internal fun BackupDialog(database: KeybooksDatabase, crypto: CryptoManager, bio
                     val root = JSONObject().put("version", 1)
                     val array = JSONArray()
                     for (project in projects) {
+                        check(project.readable) { "Unreadable project" }
                         val services = withContext(Dispatchers.IO) { database.getProjectServices(project.id) }
                         val serviceArray = JSONArray()
                         for (bundle in services) {
+                            check(bundle.service.readable) { "Unreadable service" }
                             val secrets = JSONArray()
                             for (secret in bundle.secrets) {
+                                check(secret.readable) { "Unreadable secret" }
                                 secrets.put(JSONObject().put("name", secret.name).put("hidden", secret.hidden)
                                     .put("value", unlock(secret)))
                             }

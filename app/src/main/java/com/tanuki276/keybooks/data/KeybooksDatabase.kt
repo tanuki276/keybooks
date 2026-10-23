@@ -199,13 +199,14 @@ class KeybooksDatabase(
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(0)
                 val recordId = cursor.getString(1)
-                val name = decryptMetadata(
+                val name = runCatching { decryptMetadata(
                     TYPE_PROJECT,
                     recordId,
                     cursor.getBlob(2),
                     cursor.getBlob(3)
                 )
-                result += ProjectItem(id, name, cursor.getLong(4))
+                }.getOrNull()
+                result += ProjectItem(id, name ?: "復旧が必要なプロジェクト #$id", cursor.getLong(4), name != null)
             }
         }
         return result
@@ -224,11 +225,13 @@ class KeybooksDatabase(
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(0)
                 val recordId = cursor.getString(1)
+                val name = runCatching { decryptMetadata(TYPE_SERVICE, recordId, cursor.getBlob(3), cursor.getBlob(4)) }.getOrNull()
                 services += ServiceItem(
                     id = id,
                     projectId = cursor.getLong(2),
-                    name = decryptMetadata(TYPE_SERVICE, recordId, cursor.getBlob(3), cursor.getBlob(4)),
-                    createdAt = cursor.getLong(5)
+                    name = name ?: "復旧が必要なサービス #$id",
+                    createdAt = cursor.getLong(5),
+                    readable = name != null
                 )
             }
         }
@@ -249,6 +252,7 @@ class KeybooksDatabase(
             "created_at ASC"
         ).use { cursor ->
             while (cursor.moveToNext()) {
+                try {
                 val recordId = cursor.getString(1)
                 val metadata = JSONObject(
                     decryptMetadata(TYPE_SECRET, recordId, cursor.getBlob(3), cursor.getBlob(4))
@@ -278,6 +282,11 @@ class KeybooksDatabase(
                             Base64.getDecoder().decode(it.getString("salt")))
                     }
                 )
+                } catch (_: Exception) {
+                    result += SecretItem(cursor.getLong(0), cursor.getLong(2),
+                        "復旧が必要な項目 #${cursor.getLong(0)}", byteArrayOf(), byteArrayOf(),
+                        true, AuthType.NONE, null, cursor.getLong(7), readable = false)
+                }
             }
         }
         return result

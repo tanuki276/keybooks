@@ -10,6 +10,8 @@ import android.os.Looper
 import android.os.PersistableBundle
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
@@ -354,6 +356,7 @@ private fun SecretRow(
     LaunchedEffect(maskEpoch) { value = null; editing = false; passwordDialog = false }
 
     fun reveal() {
+        if (!secret.readable) { error = "鍵の消失または改ざんを検出しました。設定からバックアップを復元してください。"; return }
         error = null
         when (secret.authType) {
             AuthType.NONE -> runCatching {
@@ -530,7 +533,7 @@ private fun SecretDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (initial == null) "機密情報を追加" else "機密情報を編集") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("名前") }, placeholder = { Text("GITHUB_TOKEN") })
                 OutlinedTextField(
                     value,
@@ -635,12 +638,16 @@ private fun SearchSort(query: String, onQuery: (String) -> Unit, alphabetical: B
 
 @Composable
 private fun EntryActions(name: String, onRename: (String) -> Unit, onDelete: () -> Unit) {
+    var menu by remember { mutableStateOf(false) }
     var edit by remember { mutableStateOf(false) }
     var delete by remember { mutableStateOf(false) }
     var text by remember(name) { mutableStateOf(name) }
-    Column {
-        TextButton(onClick = { edit = true }) { Text("名前変更") }
-        TextButton(onClick = { delete = true }) { Text("削除") }
+    Box {
+        TextButton(onClick = { menu = true }) { Text("操作") }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(text = { Text("名前変更") }, onClick = { menu = false; edit = true })
+            DropdownMenuItem(text = { Text("削除") }, onClick = { menu = false; delete = true })
+        }
     }
     if (edit) AlertDialog(onDismissRequest = { edit = false }, title = { Text("名前を変更") },
         text = { OutlinedTextField(text, { text = it }, singleLine = true) },

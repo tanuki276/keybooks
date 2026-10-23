@@ -40,9 +40,9 @@ class DatabaseSecurityTest {
     @Test fun metadataAndValueTamperingFailClosed() {
         val project = seed()
         database.writableDatabase.execSQL("UPDATE secrets SET encrypted_value = zeroblob(length(encrypted_value))")
-        try { database.getProjectServices(project); fail("Modified DB value accepted") } catch (_: IllegalStateException) { }
+        assertFalse(database.getProjectServices(project).single().secrets.single().readable)
         database.writableDatabase.execSQL("UPDATE projects SET encrypted_metadata = zeroblob(length(encrypted_metadata))")
-        try { database.getProjects(); fail("Modified metadata accepted") } catch (_: java.security.GeneralSecurityException) { }
+        assertFalse(database.getProjects().single().readable)
     }
     @Test fun importValidatesBeforeWritingAndMerges() {
         seed()
