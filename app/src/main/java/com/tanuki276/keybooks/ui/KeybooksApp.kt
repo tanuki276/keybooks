@@ -10,6 +10,8 @@ import android.os.Looper
 import android.os.PersistableBundle
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
@@ -26,6 +28,7 @@ import com.tanuki276.keybooks.R
 import com.tanuki276.keybooks.data.*
 import com.tanuki276.keybooks.security.BiometricGate
 import com.tanuki276.keybooks.security.CryptoManager
+import com.tanuki276.keybooks.security.PasswordStrength
 import com.tanuki276.keybooks.settings.AppPreferences
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -46,27 +49,38 @@ fun KeybooksApp(
     var projects by remember { mutableStateOf(emptyList<ProjectItem>()) }
     var services by remember { mutableStateOf(emptyList<ServiceBundle>()) }
     var refresh by remember { mutableIntStateOf(0) }
+    var backupOpen by remember { mutableStateOf(false) }
+    var appError by remember { mutableStateOf<String?>(null) }
+    fun mutate(action: () -> Unit) {
+        scope.launch {
+            try { withContext(Dispatchers.IO) { action() }; refresh++ }
+            catch (_: Exception) { appError = "保存できませんでした。空き容量を確認して再試行してください。データは削除しないでください。" }
+        }
+    }
     var settingsOpen by remember { mutableStateOf(false) }
     var clipboardClearSeconds by remember { mutableStateOf(appPreferences.clipboardClearSeconds) }
 
     LaunchedEffect(project?.id, refresh) {
-        if (project == null) {
-            projects = withContext(Dispatchers.IO) { database.getProjects() }
-        } else {
-            services = withContext(Dispatchers.IO) { database.getProjectServices(project!!.id) }
+        try {
+            val selected = project
+            if (selected == null) projects = withContext(Dispatchers.IO) { database.getProjects() }
+            else services = withContext(Dispatchers.IO) { database.getProjectServices(selected.id) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            projects = emptyList(); services = emptyList()
+            appError = "データを読み込めません。鍵の消失またはデータ破損の可能性があります。アンインストールせず、設定の暗号化バックアップから復元してください。"
         }
     }
 
     if (project == null) {
         ProjectList(
             projects = projects,
+            onManage = { id, name -> mutate { if (name == null) database.delete("projects", id) else database.rename("projects", id, name) } },
             onOpen = { project = it },
             onSettings = { settingsOpen = true },
             onCreate = { name ->
-                scope.launch {
-                    withContext(Dispatchers.IO) { database.insertProject(name) }
-                    refresh++
-                }
+                mutate { database.insertProject(name) }
             }
         )
     } else {
@@ -80,28 +94,33 @@ fun KeybooksApp(
             maskEpoch = maskEpoch,
             onBack = { project = null },
             onSettings = { settingsOpen = true },
+            onManage = { table, id, name -> mutate { if (name == null) database.delete(table, id) else database.rename(table, id, name) } },
             onCreateService = { name ->
-                scope.launch {
-                    withContext(Dispatchers.IO) { database.insertService(project!!.id, name) }
-                    refresh++
-                }
+                val id = project!!.id
+                mutate { database.insertService(id, name) }
             },
             onCreateSecret = { serviceId, draft, done, fail ->
                 fun save(payload: com.tanuki276.keybooks.security.EncryptedPayload) {
                     scope.launch {
+                        try {
                         withContext(Dispatchers.IO) {
-                            database.insertSecret(
+                            val recovery = if (draft.authType == AuthType.BIOMETRIC)
+                                cryptoManager.encryptWithPassword(draft.value, draft.password) else null
+                            if (draft.id != null) database.replaceSecret(draft.id, serviceId, draft.name, payload, draft.hidden, draft.authType, recovery)
+                            else database.insertSecret(
                                 serviceId = serviceId,
                                 name = draft.name,
                                 encryptedValue = payload.encryptedValue,
                                 iv = payload.iv,
                                 hidden = draft.hidden,
                                 authType = draft.authType,
-                                passwordSalt = payload.passwordSalt
+                                passwordSalt = payload.passwordSalt,
+                                recovery = recovery
                             )
                         }
                         refresh++
                         done()
+                        } catch (_: Exception) { fail("保存できませんでした。空き容量を確認して再試行してください") }
                     }
                 }
 
@@ -132,6 +151,7 @@ fun KeybooksApp(
 
     if (settingsOpen) {
         SettingsDialog(
+            onBackup = { settingsOpen = false; backupOpen = true },
             currentSeconds = clipboardClearSeconds,
             onDismiss = { settingsOpen = false },
             onSave = { seconds ->
@@ -141,16 +161,25 @@ fun KeybooksApp(
             }
         )
     }
+    if (backupOpen) BackupDialog(database, cryptoManager, biometricGate, maskEpoch,
+        onDismiss = { backupOpen = false }, onImported = { project = null; refresh++ })
+    appError?.let { message -> AlertDialog(onDismissRequest = { appError = null },
+        title = { Text("データの復旧") }, text = { Text(message) },
+        confirmButton = { TextButton(onClick = { appError = null; backupOpen = true }) { Text("バックアップを復元") } },
+        dismissButton = { TextButton(onClick = { appError = null; refresh++ }) { Text("再試行") } }) }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ProjectList(
     projects: List<ProjectItem>,
+    onManage: (Long, String?) -> Unit,
     onOpen: (ProjectItem) -> Unit,
     onSettings: () -> Unit,
     onCreate: (String) -> Unit
 ) {
+    var query by remember { mutableStateOf("") }
+    var alphabetical by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -179,12 +208,16 @@ private fun ProjectList(
                 modifier = Modifier.fillMaxSize().padding(padding),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(projects, key = { it.id }) { item ->
+                item { SearchSort(query, { query = it }, alphabetical, { alphabetical = !alphabetical }) }
+                items(projects.filter { it.name.contains(query, true) }.let { if (alphabetical) it.sortedBy { p -> p.name.lowercase() } else it }, key = { it.id }) { item ->
                     Card(
                         onClick = { onOpen(item) },
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
                     ) {
-                        Text(item.name, modifier = Modifier.padding(20.dp), style = MaterialTheme.typography.titleMedium)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(item.name, modifier = Modifier.weight(1f).padding(20.dp), style = MaterialTheme.typography.titleMedium)
+                            EntryActions(item.name, { onManage(item.id, it) }, { onManage(item.id, null) })
+                        }
                     }
                 }
                 item { Spacer(Modifier.height(80.dp)) }
@@ -213,9 +246,12 @@ private fun ProjectScreen(
     maskEpoch: Int,
     onBack: () -> Unit,
     onSettings: () -> Unit,
+    onManage: (String, Long, String?) -> Unit,
     onCreateService: (String) -> Unit,
     onCreateSecret: (Long, SecretDraft, () -> Unit, (String) -> Unit) -> Unit
 ) {
+    var query by remember { mutableStateOf("") }
+    var alphabetical by remember { mutableStateOf(false) }
     var serviceDialog by remember { mutableStateOf(false) }
     var selectedServiceId by remember { mutableStateOf<Long?>(null) }
 
@@ -241,13 +277,17 @@ private fun ProjectScreen(
             modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            items(services, key = { it.service.id }) { bundle ->
+            item { SearchSort(query, { query = it }, alphabetical, { alphabetical = !alphabetical }) }
+            items(services.filter { it.service.name.contains(query, true) || it.secrets.any { secret -> secret.name.contains(query, true) } }
+                .let { if (alphabetical) it.sortedBy { b -> b.service.name.lowercase() } else it }, key = { it.service.id }) { bundle ->
                 Card(Modifier.fillMaxWidth()) {
                     Row(
                         Modifier.fillMaxWidth().padding(start = 16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(bundle.service.name, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                        EntryActions(bundle.service.name,
+                            { onManage("services", bundle.service.id, it) }, { onManage("services", bundle.service.id, null) })
                         IconButton(onClick = { selectedServiceId = bundle.service.id }) {
                             VectorIcon(R.drawable.ic_add, "機密情報追加")
                         }
@@ -259,7 +299,10 @@ private fun ProjectScreen(
                             cryptoManager = cryptoManager,
                             biometricGate = biometricGate,
                             clipboardClearSeconds = clipboardClearSeconds,
-                            maskEpoch = maskEpoch
+                            maskEpoch = maskEpoch,
+                            onRename = { onManage("secrets", secret.id, it) },
+                            onDelete = { onManage("secrets", secret.id, null) },
+                            onEdit = { draft, done, fail -> onCreateSecret(secret.serviceId, draft.copy(id = secret.id), done, fail) }
                         )
                     }
                     if (bundle.secrets.isEmpty()) {
@@ -294,10 +337,16 @@ private fun SecretRow(
     cryptoManager: CryptoManager,
     biometricGate: BiometricGate,
     clipboardClearSeconds: Long?,
-    maskEpoch: Int
+    maskEpoch: Int,
+    onRename: (String) -> Unit,
+    onDelete: () -> Unit,
+    onEdit: (SecretDraft, () -> Unit, (String) -> Unit) -> Unit
 ) {
     val context = LocalContext.current
-    var value by remember(secret.id) { mutableStateOf<String?>(null) }
+    val currentEpoch by rememberUpdatedState(maskEpoch)
+    var recoveryMode by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf(false) }
+    var value by remember(secret) { mutableStateOf<String?>(null) }
     var passwordDialog by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -307,36 +356,42 @@ private fun SecretRow(
             value = null
         }
     }
-    LaunchedEffect(maskEpoch) { value = null }
+    LaunchedEffect(maskEpoch) { value = null; editing = false; passwordDialog = false }
 
     fun reveal() {
+        if (!secret.readable) { error = "鍵の消失または改ざんを検出しました。設定からバックアップを復元してください。"; return }
         error = null
+        val requestedEpoch = maskEpoch
         when (secret.authType) {
             AuthType.NONE -> runCatching {
                 cryptoManager.decryptWithoutAuthentication(secret.encryptedValue, secret.iv)
-            }.onSuccess { value = it }.onFailure { error = "復号に失敗しました" }
+            }.onSuccess { value = it }.onFailure { error = "復号できません。データ破損または鍵の消失が考えられます。設定からバックアップを復元してください。" }
 
-            AuthType.PASSWORD -> passwordDialog = true
+            AuthType.PASSWORD -> { recoveryMode = false; passwordDialog = true }
 
             AuthType.BIOMETRIC -> runCatching {
-                cryptoManager.newBiometricDecryptCipher(secret.iv)
+                cryptoManager.newBiometricDecryptCipher(secret.iv, com.tanuki276.keybooks.security.Envelope.isEnvelope(secret.encryptedValue))
             }.onSuccess { cipher ->
                 biometricGate.authenticate(
                     cipher = cipher,
                     title = secret.name,
                     onSuccess = { authenticated ->
                         runCatching { cryptoManager.decryptWithAuthenticatedCipher(authenticated, secret.encryptedValue) }
-                            .onSuccess { value = it }
-                            .onFailure { error = "復号に失敗しました" }
+                            .onSuccess { if (currentEpoch == requestedEpoch) value = it }
+                            .onFailure { error = "復号できません。データ破損または鍵の消失が考えられます。設定からバックアップを復元してください。" }
                     },
                     onError = { error = it }
                 )
-            }.onFailure { error = "生体認証キーを利用できません" }
+            }.onFailure { error = "生体認証鍵が無効です。指紋の再登録などで鍵が失われた可能性があります。設定からバックアップを復元してください。" }
         }
     }
 
     Column(Modifier.fillMaxWidth().padding(16.dp)) {
-        Text(secret.name, style = MaterialTheme.typography.labelLarge)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(secret.name, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+            EntryActions(secret.name, onRename, onDelete)
+            TextButton(onClick = { if (value == null) reveal() else editing = true }) { Text(if (value == null) "解除して編集" else "値を編集") }
+        }
         Spacer(Modifier.height(4.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -350,23 +405,31 @@ private fun SecretRow(
             }) { VectorIcon(R.drawable.ic_copy, "コピー") }
         }
         Text(
-            when (secret.authType) {
+            if (!secret.readable) "認証情報を読み取れません。設定からバックアップを復元してください。" else when (secret.authType) {
                 AuthType.NONE -> "認証: なし"
                 AuthType.BIOMETRIC -> "認証: 生体認証"
                 AuthType.PASSWORD -> "認証: パスワード"
             },
             style = MaterialTheme.typography.bodySmall
         )
+        if (secret.authType == AuthType.BIOMETRIC && secret.recovery != null) {
+            TextButton(onClick = { recoveryMode = true; passwordDialog = true }) { Text("回復パスワードで解除") }
+        }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
 
+    if (editing && value != null) SecretDialog(
+        initial = secret, initialValue = value!!,
+        onDismiss = { editing = false },
+        onSave = { draft, fail -> onEdit(draft, { editing = false; value = null }, fail) })
     if (passwordDialog) {
         PasswordDialog(
             onDismiss = { passwordDialog = false },
             onSubmit = { password, wrong ->
-                val salt = secret.passwordSalt ?: return@PasswordDialog
+                val recovery = if (recoveryMode) secret.recovery else null
+                val salt = recovery?.passwordSalt ?: secret.passwordSalt ?: return@PasswordDialog
                 runCatching {
-                    cryptoManager.decryptWithPassword(secret.encryptedValue, secret.iv, salt, password)
+                    cryptoManager.decryptWithPassword(recovery?.encryptedValue ?: secret.encryptedValue, recovery?.iv ?: secret.iv, salt, password)
                 }.onSuccess {
                     value = it
                     passwordDialog = false
@@ -387,6 +450,7 @@ private fun VectorIcon(drawableRes: Int, description: String) {
 
 @Composable
 private fun SettingsDialog(
+    onBackup: () -> Unit,
     currentSeconds: Long?,
     onDismiss: () -> Unit,
     onSave: (Long?) -> Unit
@@ -400,7 +464,9 @@ private fun SettingsDialog(
         onDismissRequest = onDismiss,
         title = { Text("設定") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                TextButton(onClick = onBackup) { Text("暗号化Export / Import") }
+                Text("端末故障・アンインストールに備え、バックアップを端末外へ保存してください。生体認証の再登録前にもExportしてください。")
                 Text("クリップボード自動消去")
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Switch(checked = unlimited, onCheckedChange = { unlimited = it })
@@ -449,26 +515,31 @@ private data class SecretDraft(
     val value: String,
     val hidden: Boolean,
     val authType: AuthType,
-    val password: String
+    val password: String,
+    val id: Long? = null
 )
 
 @Composable
 private fun SecretDialog(
+    initial: SecretItem? = null,
+    initialValue: String = "",
     onDismiss: () -> Unit,
     onSave: (SecretDraft, (String) -> Unit) -> Unit
 ) {
-    var name by remember { mutableStateOf("") }
-    var value by remember { mutableStateOf("") }
-    var hidden by remember { mutableStateOf(true) }
-    var auth by remember { mutableStateOf(AuthType.NONE) }
+    var name by remember { mutableStateOf(initial?.name ?: "") }
+    var value by remember { mutableStateOf(initialValue) }
+    var hidden by remember { mutableStateOf(initial?.hidden ?: true) }
+    var auth by remember { mutableStateOf(initial?.authType ?: AuthType.NONE) }
     var password by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
+    var saving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("機密情報を追加") },
+        onDismissRequest = { if (!saving) onDismiss() },
+        title = { Text(if (initial == null) "機密情報を追加" else "機密情報を編集") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("名前") }, placeholder = { Text("GITHUB_TOKEN") })
                 OutlinedTextField(
                     value,
@@ -485,24 +556,28 @@ private fun SecretDialog(
                 AuthOption("なし", AuthType.NONE, auth) { auth = it }
                 AuthOption("生体認証", AuthType.BIOMETRIC, auth) { auth = it }
                 AuthOption("パスワード", AuthType.PASSWORD, auth) { auth = it }
-                if (auth == AuthType.PASSWORD) {
+                if (auth == AuthType.PASSWORD || auth == AuthType.BIOMETRIC) {
                     OutlinedTextField(
                         password,
                         { password = it },
-                        label = { Text("任意パスワード") },
+                        label = { Text(if (auth == AuthType.BIOMETRIC) "回復パスワード（12文字以上）" else "保護パスワード") },
                         visualTransformation = PasswordVisualTransformation()
                     )
+                    OutlinedTextField(confirmation, { confirmation = it },
+                        label = { Text("パスワードの確認") }, visualTransformation = PasswordVisualTransformation())
                 }
+                if (auth == AuthType.BIOMETRIC) Text("指紋の再登録で鍵が無効になった場合は、このパスワードで解除できます。端末外バックアップも作成してください。")
+                if (auth != AuthType.NONE) PasswordStrength.warning(password)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
         confirmButton = {
             Button(
-                onClick = { onSave(SecretDraft(name.trim(), value, hidden, auth, password)) { error = it } },
-                enabled = name.isNotBlank() && value.isNotBlank() && (auth != AuthType.PASSWORD || password.isNotBlank())
+                onClick = { saving = true; onSave(SecretDraft(name.trim(), value, hidden, auth, password)) { error = it; saving = false } },
+                enabled = !saving && (auth == AuthType.NONE || password == confirmation) && name.isNotBlank() && value.isNotBlank() && (auth != AuthType.PASSWORD || password.isNotBlank()) && (auth != AuthType.BIOMETRIC || password.length >= 12)
             ) { Text("保存") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } }
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !saving) { Text("キャンセル") } }
     )
 }
 
@@ -529,7 +604,7 @@ private fun PasswordDialog(onDismiss: () -> Unit, onSubmit: (String, () -> Unit)
                     label = { Text("パスワード") },
                     visualTransformation = PasswordVisualTransformation()
                 )
-                if (wrong) Text("パスワードが違います", color = MaterialTheme.colorScheme.error)
+                if (wrong) Text("パスワードが違うか、データが破損しています。バックアップからの復元も確認してください。", color = MaterialTheme.colorScheme.error)
             }
         },
         confirmButton = { Button(onClick = { onSubmit(password) { wrong = true } }, enabled = password.isNotBlank()) { Text("解除") } },
@@ -560,3 +635,34 @@ private fun copySensitive(context: Context, value: String, clearAfterSeconds: Lo
 
 private const val CLIP_TOKEN_KEY = "com.tanuki276.keybooks.CLIP_TOKEN"
 private const val MAX_CLIPBOARD_SECONDS = 31_536_000L
+
+@Composable
+private fun SearchSort(query: String, onQuery: (String) -> Unit, alphabetical: Boolean, onSort: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(16.dp)) {
+        OutlinedTextField(query, onQuery, modifier = Modifier.fillMaxWidth(), label = { Text("名前で検索") }, singleLine = true)
+        TextButton(onClick = onSort) { Text(if (alphabetical) "並び順: 名前順" else "並び順: 登録順") }
+    }
+}
+
+@Composable
+private fun EntryActions(name: String, onRename: (String) -> Unit, onDelete: () -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    var edit by remember { mutableStateOf(false) }
+    var delete by remember { mutableStateOf(false) }
+    var text by remember(name) { mutableStateOf(name) }
+    Box {
+        TextButton(onClick = { menu = true }) { Text("操作") }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(text = { Text("名前変更") }, onClick = { menu = false; edit = true })
+            DropdownMenuItem(text = { Text("削除") }, onClick = { menu = false; delete = true })
+        }
+    }
+    if (edit) AlertDialog(onDismissRequest = { edit = false }, title = { Text("名前を変更") },
+        text = { OutlinedTextField(text, { text = it }, singleLine = true) },
+        confirmButton = { TextButton(onClick = { onRename(text.trim()); edit = false }, enabled = text.isNotBlank()) { Text("保存") } },
+        dismissButton = { TextButton(onClick = { edit = false }) { Text("キャンセル") } })
+    if (delete) AlertDialog(onDismissRequest = { delete = false }, title = { Text("削除の確認") },
+        text = { Text("「$name」と配下の全データを削除します。この操作は取り消せません。") },
+        confirmButton = { TextButton(onClick = { onDelete(); delete = false }) { Text("削除する") } },
+        dismissButton = { TextButton(onClick = { delete = false }) { Text("キャンセル") } })
+}

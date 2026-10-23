@@ -150,4 +150,20 @@ passwordSalt (when applicable)
 
 ## Notes
 
-This repository currently contains the first MVP implementation. Export/import, editing/deleting entries, search, project-level locking, and encrypted backup files are good next steps.
+Project-level locking is not implemented. See the recovery and checks sections below for the current backup and validation behavior.
+
+## Recovery and portable backups
+
+Settings → **暗号化Export / Import** writes a `.kbb` file through Android's document picker. Export requires authentication for **every** protected entry. A failed or cancelled authentication aborts the entire export; entries are never silently omitted. Use a long, unique backup passphrase (at least 12 characters) and keep the file outside this device. Verify a backup by importing it before uninstalling, changing fingerprints, or resetting the device.
+
+The portable format is `KBB1 || salt[32] || IV[12] || ciphertext+tag`. PBKDF2-HMAC-SHA256 (600,000 iterations) derives a 256-bit key. AES-GCM authenticates the complete fixed header and payload. Import limits files to 16 MiB, validates all records first, and merges in a single SQLite transaction. It never clears existing records. Repeated imports create additional copies. All restored secrets use **PASSWORD** protection with the backup passphrase; authenticate and edit them to choose a different method. The archive stores logical data, not device keys or original authentication passwords.
+
+New biometric entries require a separate recovery passphrase. It encrypts an independent envelope stored inside encrypted metadata. If enrollment invalidates the biometric key, use **回復パスワードで解除**, then edit the value and choose biometric protection again to bind a new key. This recovery path is deliberately an alternative to biometric authentication. It does not recover lost metadata/standard Keystore keys: use the portable backup for device loss or reinstall. Existing biometric entries have no recovery passphrase until authenticated and saved with the new editor. Data already inaccessible before this update cannot be recovered without an earlier usable backup.
+
+New secret writes use envelope encryption (`KBE1`): a random AES-256 data key encrypts each value, and the chosen Keystore/password key wraps that data key. Legacy ciphertext remains readable and is upgraded when edited. Metadata remains protected by its separate Keystore key. StrongBox is attempted for newly generated keys, with fallback on `StrongBoxUnavailableException`; existing keys are retained. New secret metadata also authenticates a SHA-256 digest of the stored value ciphertext and IV, detecting value swaps/modification before display. Legacy records gain that binding when edited. This is not full database rollback protection.
+
+Project, service, and secret names can be edited. Values/authentication can be edited after unlocking the original secret. Deletion asks for confirmation and cascades to children. Search operates locally on decrypted names, never on secret values. Password strength warnings encourage long passphrases.
+
+## Checks
+
+CI runs `gradle :app:assembleDebug :app:testDebugUnitTest :app:lintDebug` on every push and pull request (JDK 17, Gradle 9.8.2, Android SDK 37.1). A separate emulator job runs database integrity, CRUD/cascade, and atomic import tests. JVM tests cover backup wrong passwords, salt/header/IV/ciphertext/tag tampering, truncation/size limits, envelope corruption, legacy compatibility, and randomization. Hardware biometric enrollment, StrongBox, real document providers, and process-death recovery still need physical-device testing.

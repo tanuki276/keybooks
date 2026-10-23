@@ -9,14 +9,16 @@ enum class AuthType {
 data class ProjectItem(
     val id: Long,
     val name: String,
-    val createdAt: Long
+    val createdAt: Long,
+    val readable: Boolean = true
 )
 
 data class ServiceItem(
     val id: Long,
     val projectId: Long,
     val name: String,
-    val createdAt: Long
+    val createdAt: Long,
+    val readable: Boolean = true
 )
 
 data class SecretItem(
@@ -28,7 +30,9 @@ data class SecretItem(
     val hidden: Boolean,
     val authType: AuthType,
     val passwordSalt: ByteArray?,
-    val createdAt: Long
+    val createdAt: Long,
+    val readable: Boolean = true,
+    val recovery: com.tanuki276.keybooks.security.EncryptedPayload? = null
 )
 
 data class ServiceBundle(
