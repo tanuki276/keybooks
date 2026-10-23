@@ -26,10 +26,11 @@ class CryptoManager {
     fun encryptWithoutAuthentication(value: String): EncryptedPayload {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateStandardKey())
-        return EncryptedPayload(cipher.doFinal(value.toByteArray()), cipher.iv)
+        return EncryptedPayload(cipher.doFinal(value.toByteArray(Charsets.UTF_8)), cipher.iv)
     }
 
     fun decryptWithoutAuthentication(encryptedValue: ByteArray, iv: ByteArray): String {
+        require(iv.size == GCM_IV_BYTES) { "Invalid IV" }
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, getOrCreateStandardKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
         return cipher.doFinal(encryptedValue).toString(Charsets.UTF_8)
@@ -40,24 +41,28 @@ class CryptoManager {
     }
 
     fun newBiometricDecryptCipher(iv: ByteArray): Cipher = Cipher.getInstance(TRANSFORMATION).apply {
+        require(iv.size == GCM_IV_BYTES) { "Invalid IV" }
         init(Cipher.DECRYPT_MODE, getOrCreateBiometricKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
     }
 
     fun encryptWithAuthenticatedCipher(cipher: Cipher, value: String): EncryptedPayload =
-        EncryptedPayload(cipher.doFinal(value.toByteArray()), cipher.iv)
+        EncryptedPayload(cipher.doFinal(value.toByteArray(Charsets.UTF_8)), cipher.iv)
 
     fun decryptWithAuthenticatedCipher(cipher: Cipher, encryptedValue: ByteArray): String =
         cipher.doFinal(encryptedValue).toString(Charsets.UTF_8)
 
     fun encryptWithPassword(value: String, password: String): EncryptedPayload {
+        require(password.isNotBlank()) { "Password must not be blank" }
         val salt = ByteArray(PASSWORD_SALT_BYTES).also(secureRandom::nextBytes)
         val key = derivePasswordKey(password, salt)
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key)
-        return EncryptedPayload(cipher.doFinal(value.toByteArray()), cipher.iv, salt)
+        return EncryptedPayload(cipher.doFinal(value.toByteArray(Charsets.UTF_8)), cipher.iv, salt)
     }
 
     fun decryptWithPassword(encryptedValue: ByteArray, iv: ByteArray, salt: ByteArray, password: String): String {
+        require(iv.size == GCM_IV_BYTES) { "Invalid IV" }
+        require(salt.size == PASSWORD_SALT_BYTES) { "Invalid salt" }
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, derivePasswordKey(password, salt), GCMParameterSpec(GCM_TAG_BITS, iv))
         return cipher.doFinal(encryptedValue).toString(Charsets.UTF_8)
@@ -71,7 +76,8 @@ class CryptoManager {
             KeyGenParameterSpec.Builder(STANDARD_KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
+                .setKeySize(AES_KEY_BITS)
+                .setRandomizedEncryptionRequired(true)
                 .build()
         )
         return generator.generateKey()
@@ -85,7 +91,8 @@ class CryptoManager {
         val builder = KeyGenParameterSpec.Builder(BIOMETRIC_KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
+            .setKeySize(AES_KEY_BITS)
+            .setRandomizedEncryptionRequired(true)
             .setUserAuthenticationRequired(true)
             .setInvalidatedByBiometricEnrollment(true)
 
@@ -112,13 +119,14 @@ class CryptoManager {
 
     companion object {
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
-        private const val STANDARD_KEY_ALIAS = "keybooks_standard_v1"
-        private const val BIOMETRIC_KEY_ALIAS = "keybooks_biometric_v1"
+        private const val STANDARD_KEY_ALIAS = "keybooks_standard_v2"
+        private const val BIOMETRIC_KEY_ALIAS = "keybooks_biometric_v2"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
+        private const val GCM_IV_BYTES = 12
         private const val AES_KEY_BITS = 256
-        private const val PASSWORD_SALT_BYTES = 16
-        private const val PBKDF2_ITERATIONS = 210_000
+        private const val PASSWORD_SALT_BYTES = 32
+        private const val PBKDF2_ITERATIONS = 600_000
         private const val PBKDF2_ALGORITHM = "PBKDF2WithHmacSHA256"
     }
 }
