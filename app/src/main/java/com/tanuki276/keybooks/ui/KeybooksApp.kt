@@ -12,22 +12,22 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.tanuki276.keybooks.R
 import com.tanuki276.keybooks.data.*
 import com.tanuki276.keybooks.security.BiometricGate
 import com.tanuki276.keybooks.security.CryptoManager
+import com.tanuki276.keybooks.settings.AppPreferences
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -37,13 +37,17 @@ import kotlinx.coroutines.withContext
 fun KeybooksApp(
     database: KeybooksDatabase,
     cryptoManager: CryptoManager,
-    biometricGate: BiometricGate
+    biometricGate: BiometricGate,
+    appPreferences: AppPreferences,
+    maskEpoch: Int
 ) {
     val scope = rememberCoroutineScope()
     var project by remember { mutableStateOf<ProjectItem?>(null) }
     var projects by remember { mutableStateOf(emptyList<ProjectItem>()) }
     var services by remember { mutableStateOf(emptyList<ServiceBundle>()) }
     var refresh by remember { mutableIntStateOf(0) }
+    var settingsOpen by remember { mutableStateOf(false) }
+    var clipboardClearSeconds by remember { mutableStateOf(appPreferences.clipboardClearSeconds) }
 
     LaunchedEffect(project?.id, refresh) {
         if (project == null) {
@@ -57,6 +61,7 @@ fun KeybooksApp(
         ProjectList(
             projects = projects,
             onOpen = { project = it },
+            onSettings = { settingsOpen = true },
             onCreate = { name ->
                 scope.launch {
                     withContext(Dispatchers.IO) { database.insertProject(name) }
@@ -71,7 +76,10 @@ fun KeybooksApp(
             services = services,
             cryptoManager = cryptoManager,
             biometricGate = biometricGate,
+            clipboardClearSeconds = clipboardClearSeconds,
+            maskEpoch = maskEpoch,
             onBack = { project = null },
+            onSettings = { settingsOpen = true },
             onCreateService = { name ->
                 scope.launch {
                     withContext(Dispatchers.IO) { database.insertService(project!!.id, name) }
@@ -121,6 +129,18 @@ fun KeybooksApp(
             }
         )
     }
+
+    if (settingsOpen) {
+        SettingsDialog(
+            currentSeconds = clipboardClearSeconds,
+            onDismiss = { settingsOpen = false },
+            onSave = { seconds ->
+                appPreferences.clipboardClearSeconds = seconds
+                clipboardClearSeconds = seconds
+                settingsOpen = false
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -128,15 +148,25 @@ fun KeybooksApp(
 private fun ProjectList(
     projects: List<ProjectItem>,
     onOpen: (ProjectItem) -> Unit,
+    onSettings: () -> Unit,
     onCreate: (String) -> Unit
 ) {
     var dialog by remember { mutableStateOf(false) }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Keybooks") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Keybooks") },
+                actions = {
+                    IconButton(onClick = onSettings) {
+                        VectorIcon(R.drawable.ic_settings, "設定")
+                    }
+                }
+            )
+        },
         floatingActionButton = {
             FloatingActionButton(onClick = { dialog = true }) {
-                Icon(Icons.Default.Add, contentDescription = "プロジェクト追加")
+                VectorIcon(R.drawable.ic_add, "プロジェクト追加")
             }
         }
     ) { padding ->
@@ -179,7 +209,10 @@ private fun ProjectScreen(
     services: List<ServiceBundle>,
     cryptoManager: CryptoManager,
     biometricGate: BiometricGate,
+    clipboardClearSeconds: Long?,
+    maskEpoch: Int,
     onBack: () -> Unit,
+    onSettings: () -> Unit,
     onCreateService: (String) -> Unit,
     onCreateSecret: (Long, SecretDraft, () -> Unit, (String) -> Unit) -> Unit
 ) {
@@ -191,15 +224,16 @@ private fun ProjectScreen(
             TopAppBar(
                 title = { Text(project.name) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
-                    }
+                    IconButton(onClick = onBack) { VectorIcon(R.drawable.ic_back, "戻る") }
+                },
+                actions = {
+                    IconButton(onClick = onSettings) { VectorIcon(R.drawable.ic_settings, "設定") }
                 }
             )
         },
         floatingActionButton = {
             FloatingActionButton(onClick = { serviceDialog = true }) {
-                Icon(Icons.Default.Add, contentDescription = "サービス追加")
+                VectorIcon(R.drawable.ic_add, "サービス追加")
             }
         }
     ) { padding ->
@@ -215,12 +249,18 @@ private fun ProjectScreen(
                     ) {
                         Text(bundle.service.name, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                         IconButton(onClick = { selectedServiceId = bundle.service.id }) {
-                            Icon(Icons.Default.Add, contentDescription = "機密情報追加")
+                            VectorIcon(R.drawable.ic_add, "機密情報追加")
                         }
                     }
                     bundle.secrets.forEach { secret ->
                         HorizontalDivider()
-                        SecretRow(secret, cryptoManager, biometricGate)
+                        SecretRow(
+                            secret = secret,
+                            cryptoManager = cryptoManager,
+                            biometricGate = biometricGate,
+                            clipboardClearSeconds = clipboardClearSeconds,
+                            maskEpoch = maskEpoch
+                        )
                     }
                     if (bundle.secrets.isEmpty()) {
                         Text("機密情報はまだありません", modifier = Modifier.padding(16.dp))
@@ -243,9 +283,7 @@ private fun ProjectScreen(
     selectedServiceId?.let { serviceId ->
         SecretDialog(
             onDismiss = { selectedServiceId = null },
-            onSave = { draft, fail ->
-                onCreateSecret(serviceId, draft, { selectedServiceId = null }, fail)
-            }
+            onSave = { draft, fail -> onCreateSecret(serviceId, draft, { selectedServiceId = null }, fail) }
         )
     }
 }
@@ -254,7 +292,9 @@ private fun ProjectScreen(
 private fun SecretRow(
     secret: SecretItem,
     cryptoManager: CryptoManager,
-    biometricGate: BiometricGate
+    biometricGate: BiometricGate,
+    clipboardClearSeconds: Long?,
+    maskEpoch: Int
 ) {
     val context = LocalContext.current
     var value by remember(secret.id) { mutableStateOf<String?>(null) }
@@ -267,6 +307,7 @@ private fun SecretRow(
             value = null
         }
     }
+    LaunchedEffect(maskEpoch) { value = null }
 
     fun reveal() {
         error = null
@@ -303,18 +344,10 @@ private fun SecretRow(
                 modifier = Modifier.weight(1f),
                 fontFamily = FontFamily.Monospace
             )
-            IconButton(onClick = { reveal() }) {
-                Icon(Icons.Default.Visibility, contentDescription = "表示")
-            }
+            IconButton(onClick = { reveal() }) { VectorIcon(R.drawable.ic_visibility, "表示") }
             IconButton(onClick = {
-                if (value == null) {
-                    reveal()
-                } else {
-                    copySensitive(context, value!!)
-                }
-            }) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "コピー")
-            }
+                if (value == null) reveal() else copySensitive(context, value!!, clipboardClearSeconds)
+            }) { VectorIcon(R.drawable.ic_copy, "コピー") }
         }
         Text(
             when (secret.authType) {
@@ -344,6 +377,57 @@ private fun SecretRow(
 }
 
 @Composable
+private fun VectorIcon(drawableRes: Int, description: String) {
+    Icon(
+        painter = painterResource(drawableRes),
+        contentDescription = description,
+        tint = LocalContentColor.current
+    )
+}
+
+@Composable
+private fun SettingsDialog(
+    currentSeconds: Long?,
+    onDismiss: () -> Unit,
+    onSave: (Long?) -> Unit
+) {
+    var unlimited by remember { mutableStateOf(currentSeconds == null) }
+    var secondsText by remember { mutableStateOf((currentSeconds ?: 30L).toString()) }
+    val seconds = secondsText.toLongOrNull()
+    val valid = unlimited || (seconds != null && seconds >= 1L)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("設定") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("クリップボード自動消去")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Switch(checked = unlimited, onCheckedChange = { unlimited = it })
+                    Spacer(Modifier.width(8.dp))
+                    Text("無期限（自動消去しない）")
+                }
+                OutlinedTextField(
+                    value = secondsText,
+                    onValueChange = { secondsText = it.filter(Char::isDigit) },
+                    enabled = !unlimited,
+                    singleLine = true,
+                    label = { Text("消去までの秒数") },
+                    supportingText = { Text("1秒以上の任意の値") }
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(if (unlimited) null else seconds) },
+                enabled = valid
+            ) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } }
+    )
+}
+
+@Composable
 private fun TextInputDialog(
     title: String,
     label: String,
@@ -355,9 +439,7 @@ private fun TextInputDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = { OutlinedTextField(text, { text = it }, label = { Text(label) }, singleLine = true) },
-        confirmButton = {
-            Button(onClick = { onSave(text.trim()) }, enabled = text.isNotBlank()) { Text("保存") }
-        },
+        confirmButton = { Button(onClick = { onSave(text.trim()) }, enabled = text.isNotBlank()) { Text("保存") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } }
     )
 }
@@ -393,7 +475,7 @@ private fun SecretDialog(
                     { value = it },
                     label = { Text("キー / 値") },
                     placeholder = { Text("ghp_••••••••") },
-                    visualTransformation = if (hidden) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None
+                    visualTransformation = if (hidden) PasswordVisualTransformation() else VisualTransformation.None
                 )
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("隠しますか？", modifier = Modifier.weight(1f))
@@ -416,9 +498,7 @@ private fun SecretDialog(
         },
         confirmButton = {
             Button(
-                onClick = {
-                    onSave(SecretDraft(name.trim(), value, hidden, auth, password)) { error = it }
-                },
+                onClick = { onSave(SecretDraft(name.trim(), value, hidden, auth, password)) { error = it } },
                 enabled = name.isNotBlank() && value.isNotBlank() && (auth != AuthType.PASSWORD || password.isNotBlank())
             ) { Text("保存") }
         },
@@ -452,24 +532,31 @@ private fun PasswordDialog(onDismiss: () -> Unit, onSubmit: (String, () -> Unit)
                 if (wrong) Text("パスワードが違います", color = MaterialTheme.colorScheme.error)
             }
         },
-        confirmButton = {
-            Button(onClick = { onSubmit(password) { wrong = true } }, enabled = password.isNotBlank()) { Text("解除") }
-        },
+        confirmButton = { Button(onClick = { onSubmit(password) { wrong = true } }, enabled = password.isNotBlank()) { Text("解除") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } }
     )
 }
 
-private fun copySensitive(context: Context, value: String) {
+private fun copySensitive(context: Context, value: String, clearAfterSeconds: Long?) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    val token = UUID.randomUUID().toString()
     val clip = ClipData.newPlainText("Keybooks secret", value)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        clip.description.extras = PersistableBundle().apply {
+    clip.description.extras = PersistableBundle().apply {
+        putString(CLIP_TOKEN_KEY, token)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
         }
     }
     clipboard.setPrimaryClip(clip)
-    Handler(Looper.getMainLooper()).postDelayed({
-        val current = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
-        if (current == value) clipboard.clearPrimaryClip()
-    }, 30_000)
+
+    if (clearAfterSeconds != null) {
+        val delayMillis = clearAfterSeconds.coerceAtMost(MAX_CLIPBOARD_SECONDS) * 1_000L
+        Handler(Looper.getMainLooper()).postDelayed({
+            val currentToken = clipboard.primaryClipDescription?.extras?.getString(CLIP_TOKEN_KEY)
+            if (currentToken == token) clipboard.clearPrimaryClip()
+        }, delayMillis)
+    }
 }
+
+private const val CLIP_TOKEN_KEY = "com.tanuki276.keybooks.CLIP_TOKEN"
+private const val MAX_CLIPBOARD_SECONDS = 31_536_000L
