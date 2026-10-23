@@ -2,6 +2,7 @@ name: Android checks
 on:
   push:
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -25,6 +26,13 @@ jobs:
           gradle-version: '9.8.2'
       - run: sdkmanager 'platforms;android-37.1' 'build-tools;36.0.0'
       - run: gradle --no-daemon :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: keybooks-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()
         with:
