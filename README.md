@@ -28,15 +28,20 @@ My Project
 
 ## Security model
 
-Secret values are never written to SQLite as plaintext.
+Sensitive user data is never intentionally written to SQLite as plaintext.
 
 - AES-256-GCM is used for encryption.
+- Secret values and metadata use **separate Android Keystore keys**.
+- Project names are encrypted at rest.
+- Service/tool names are encrypted at rest.
+- Secret names, hidden/visible setting, authentication type, and password salt are bundled into encrypted metadata.
+- Metadata encryption uses AES-GCM Additional Authenticated Data (AAD) bound to a random per-record identifier and record type, so moving metadata ciphertext between unrelated records causes authentication failure.
 - `None` authentication uses an AES key stored in Android Keystore.
 - `Biometric` authentication uses a separate Android Keystore AES key that requires strong biometric authentication for each use.
 - `Password` authentication derives a per-secret AES key with `PBKDF2WithHmacSHA256`, a random 32-byte per-secret salt, and 600,000 iterations.
 - Android Keystore keys explicitly require randomized encryption.
 - AES-GCM IV lengths are validated before decryption.
-- Project names, service names, secret names, auth type, and timestamps are currently stored as metadata in plaintext; secret values remain encrypted.
+- Temporary PBKDF2 key bytes are cleared after constructing the AES key object.
 - Screenshots and screen recording are blocked with `FLAG_SECURE`.
 - Overlay windows are hidden on supported Android versions.
 - Autofill and Content Capture are disabled for the app window to reduce accidental secret exposure.
@@ -48,7 +53,23 @@ Secret values are never written to SQLite as plaintext.
 - Revealed secrets are re-masked after 30 seconds and immediately re-masked when the app leaves the foreground.
 - Release builds enable R8 minification and resource shrinking.
 
-> If Android Keystore keys become invalidated, secrets encrypted by those keys may become unrecoverable. Password-protected entries also cannot be recovered if the password is forgotten. There is intentionally no recovery server.
+> SQLite still contains structural information such as numeric IDs, parent/child relationships, creation timestamps, random record IDs, IVs, and ciphertext sizes. This can reveal approximate record counts and hierarchy, but not names, secret values, auth type, hidden state, or password salts without the device-held keys.
+
+> If Android Keystore keys become invalidated, data encrypted by those keys may become unrecoverable. Password-protected entries also cannot be recovered if the password is forgotten. There is intentionally no recovery server.
+
+## Database migration
+
+Database version 2 migrates the original plaintext metadata schema automatically.
+
+During migration:
+
+1. Existing project, service, and secret metadata is read locally.
+2. Metadata is encrypted with the dedicated metadata key.
+3. Secret values remain encrypted and are copied without being exposed as plaintext by the migration.
+4. New encrypted tables are populated.
+5. Legacy plaintext tables are deleted.
+
+The migration is performed locally and does not use a server or network permission.
 
 ## Icons
 
@@ -62,30 +83,42 @@ projects
       └─ secrets
 ```
 
-SQLite tables:
+SQLite v2 tables intentionally avoid plaintext names and auth metadata:
 
 ```text
 projects
 - id
-- name
+- record_id
+- encrypted_metadata
+- metadata_iv
 - created_at
 
 services
 - id
+- record_id
 - project_id
-- name
+- encrypted_metadata
+- metadata_iv
 - created_at
 
 secrets
 - id
+- record_id
 - service_id
-- name
+- encrypted_metadata
+- metadata_iv
 - encrypted_value
 - iv
-- hidden
-- auth_type
-- password_salt
 - created_at
+```
+
+For a secret, `encrypted_metadata` contains the encrypted logical fields:
+
+```text
+name
+hidden
+authType
+passwordSalt (when applicable)
 ```
 
 ## Tech stack
@@ -95,6 +128,7 @@ secrets
 - Android SQLite (`SQLiteOpenHelper`)
 - Android Keystore
 - AES/GCM/NoPadding
+- PBKDF2WithHmacSHA256
 - AndroidX Biometric
 - Android VectorDrawable / SVG path assets
 
@@ -111,9 +145,9 @@ secrets
    - Hidden: yes/no
    - Authentication: none / biometric / password
 7. Save it.
-8. The project screen shows `GitHub` and all secrets saved under it.
+8. The project screen shows `GitHub` and all secrets saved under it after local decryption in memory.
 9. Open Settings to choose a clipboard auto-clear delay or unlimited mode.
 
 ## Notes
 
-This repository currently contains the first MVP implementation. Export/import, editing/deleting entries, search, project-level locking, encrypted metadata, and encrypted backup files are good next steps.
+This repository currently contains the first MVP implementation. Export/import, editing/deleting entries, search, project-level locking, and encrypted backup files are good next steps.
