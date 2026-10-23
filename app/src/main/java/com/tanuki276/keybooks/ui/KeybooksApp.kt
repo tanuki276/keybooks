@@ -65,6 +65,8 @@ fun KeybooksApp(
             val selected = project
             if (selected == null) projects = withContext(Dispatchers.IO) { database.getProjects() }
             else services = withContext(Dispatchers.IO) { database.getProjectServices(selected.id) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (_: Exception) {
             projects = emptyList(); services = emptyList()
             appError = "データを読み込めません。鍵の消失またはデータ破損の可能性があります。アンインストールせず、設定の暗号化バックアップから復元してください。"
