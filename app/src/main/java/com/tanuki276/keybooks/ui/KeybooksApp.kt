@@ -403,7 +403,7 @@ private fun SecretRow(
             }) { VectorIcon(R.drawable.ic_copy, "コピー") }
         }
         Text(
-            when (secret.authType) {
+            if (!secret.readable) "認証情報を読み取れません。設定からバックアップを復元してください。" else when (secret.authType) {
                 AuthType.NONE -> "認証: なし"
                 AuthType.BIOMETRIC -> "認証: 生体認証"
                 AuthType.PASSWORD -> "認証: パスワード"
