@@ -12,12 +12,12 @@ class BiometricGate(private val activity: FragmentActivity) {
         title: String,
         onSuccess: (Cipher) -> Unit,
         onError: (String) -> Unit
-    ) {
+    ): () -> Unit {
         val allowed = BiometricManager.Authenticators.BIOMETRIC_STRONG
         val status = BiometricManager.from(activity).canAuthenticate(allowed)
         if (status != BiometricManager.BIOMETRIC_SUCCESS) {
             onError("生体認証を利用できません。端末設定を確認してください。")
-            return
+            return {}
         }
 
         val prompt = BiometricPrompt(
@@ -38,7 +38,7 @@ class BiometricGate(private val activity: FragmentActivity) {
                 }
 
                 override fun onAuthenticationFailed() {
-                    onError("生体認証に失敗しました。")
+                    // A mismatch is non-terminal; Android keeps the prompt open for retry.
                 }
             }
         )
@@ -51,5 +51,6 @@ class BiometricGate(private val activity: FragmentActivity) {
             .build()
 
         prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+        return { prompt.cancelAuthentication() }
     }
 }

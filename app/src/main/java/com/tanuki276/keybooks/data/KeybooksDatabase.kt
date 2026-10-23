@@ -173,7 +173,7 @@ class KeybooksDatabase(
         try {
             for (i in 0 until projects.length()) {
                 checkActive()
-            val project = projects.getJSONObject(i)
+                val project = projects.getJSONObject(i)
                 val projectId = insertProject(project.getString("name"))
                 val services = project.getJSONArray("services")
                 for (j in 0 until services.length()) {

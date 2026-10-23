@@ -66,26 +66,36 @@ internal fun BackupDialog(database: KeybooksDatabase, crypto: CryptoManager, bio
         message = if (uri == null) "Importをキャンセルしました" else "ファイルを選択しました。バックアップのパスワードを入力して復元してください。"
     }
 
+    suspend fun unlockPassword(secret: SecretItem, recovery: Boolean = false): String {
+        val answer = CompletableDeferred<String?>()
+        entryPassword = ""
+        passwordRequest = (if (recovery) "${secret.name} の回復パスワード" else secret.name) to answer
+        val supplied = answer.await() ?: throw CancellationException()
+        passwordRequest = null; entryPassword = ""
+        val payload = if (recovery) requireNotNull(secret.recovery)
+            else EncryptedPayload(secret.encryptedValue, secret.iv, secret.passwordSalt)
+        return withContext(Dispatchers.IO) {
+            crypto.decryptWithPassword(payload.encryptedValue, payload.iv, requireNotNull(payload.passwordSalt), supplied)
+        }
+    }
+
     suspend fun unlock(secret: SecretItem): String {
         return when (secret.authType) {
             AuthType.NONE -> withContext(Dispatchers.IO) { crypto.decryptWithoutAuthentication(secret.encryptedValue, secret.iv) }
-            AuthType.PASSWORD -> {
-                val answer = CompletableDeferred<String?>()
-                entryPassword = ""; passwordRequest = secret.name to answer
-                val supplied = answer.await() ?: throw CancellationException()
-                passwordRequest = null; entryPassword = ""
-                withContext(Dispatchers.IO) {
-                    crypto.decryptWithPassword(secret.encryptedValue, secret.iv, requireNotNull(secret.passwordSalt), supplied)
-                }
-            }
-            AuthType.BIOMETRIC -> {
+            AuthType.PASSWORD -> unlockPassword(secret)
+            AuthType.BIOMETRIC -> try {
                 val answer = CompletableDeferred<String>()
-                biometric.authenticate(crypto.newBiometricDecryptCipher(secret.iv, Envelope.isEnvelope(secret.encryptedValue)), "${secret.name} をExport",
+                val cancel = biometric.authenticate(crypto.newBiometricDecryptCipher(secret.iv, Envelope.isEnvelope(secret.encryptedValue)), "${secret.name} をExport",
                     onSuccess = { cipher ->
-                        try { answer.complete(crypto.decryptWithAuthenticatedCipher(cipher, secret.encryptedValue)) }
-                        catch (e: Exception) { answer.completeExceptionally(e) }
+                        if (answer.isActive) {
+                            try { answer.complete(crypto.decryptWithAuthenticatedCipher(cipher, secret.encryptedValue)) }
+                            catch (e: Exception) { answer.completeExceptionally(e) }
+                        }
                     }, onError = { answer.completeExceptionally(IllegalStateException(it)) })
-                answer.await()
+                try { answer.await() } finally { cancel() }
+            } catch (e: java.security.GeneralSecurityException) {
+                if (secret.recovery == null) throw e
+                unlockPassword(secret, recovery = true)
             }
         }
     }
@@ -146,14 +156,18 @@ internal fun BackupDialog(database: KeybooksDatabase, crypto: CryptoManager, bio
                     val projects = withContext(Dispatchers.IO) { database.getProjects() }
                     val root = JSONObject().put("version", 1)
                     val array = JSONArray()
+                    var recordCount = 0
                     for (project in projects) {
+                        check(++recordCount <= 10_000)
                         check(project.readable) { "Unreadable project" }
                         val services = withContext(Dispatchers.IO) { database.getProjectServices(project.id) }
                         val serviceArray = JSONArray()
                         for (bundle in services) {
+                            check(++recordCount <= 10_000)
                             check(bundle.service.readable) { "Unreadable service" }
                             val secrets = JSONArray()
                             for (secret in bundle.secrets) {
+                                check(++recordCount <= 10_000)
                                 check(secret.readable) { "Unreadable secret" }
                                 secrets.put(JSONObject().put("name", secret.name).put("hidden", secret.hidden)
                                     .put("value", unlock(secret)))

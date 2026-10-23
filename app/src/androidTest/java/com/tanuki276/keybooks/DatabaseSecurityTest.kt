@@ -57,4 +57,35 @@ class DatabaseSecurityTest {
         catch (_: org.json.JSONException) { }
         assertEquals(2, database.getProjects().size)
     }
+    @Test fun recoveryPayloadSurvivesAndCancelledImportRollsBack() {
+        val project = database.insertProject("project")
+        val service = database.insertService(project, "service")
+        val recovery = crypto.encryptWithPassword("recoverable", "long recovery password")
+        val primary = crypto.encryptWithoutAuthentication("recoverable")
+        database.insertSecret(service, "secret", primary.encryptedValue, primary.iv,
+            true, AuthType.BIOMETRIC, null, recovery)
+        val restoredRecovery = database.getProjectServices(project).single().secrets.single().recovery!!
+        assertEquals("recoverable", crypto.decryptWithPassword(restoredRecovery.encryptedValue,
+            restoredRecovery.iv, restoredRecovery.passwordSalt!!, "long recovery password"))
+        var checks = 0
+        try {
+            database.importPortable("""{"version":1,"projects":[{"name":"cancelled","services":[]}]}""", "backup password") {
+                checks++
+                if (checks == 3) throw java.util.concurrent.CancellationException()
+            }
+            fail("Import should cancel before commit")
+        } catch (_: java.util.concurrent.CancellationException) { }
+        assertEquals(1, database.getProjects().size)
+    }
+
+    @Test fun damagedOldRecordDoesNotHideRestoredData() {
+        seed()
+        database.writableDatabase.execSQL("UPDATE projects SET encrypted_metadata = zeroblob(length(encrypted_metadata))")
+        database.importPortable("""{"version":1,"projects":[{"name":"restored","services":[]}]}""", "backup password")
+        val projects = database.getProjects()
+        assertEquals(2, projects.size)
+        assertTrue(projects.single { it.name == "restored" }.readable)
+        assertEquals(1, projects.count { !it.readable })
+    }
+
 }

@@ -529,10 +529,12 @@ private fun SecretDialog(
     var hidden by remember { mutableStateOf(initial?.hidden ?: true) }
     var auth by remember { mutableStateOf(initial?.authType ?: AuthType.NONE) }
     var password by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
+    var saving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!saving) onDismiss() },
         title = { Text(if (initial == null) "機密情報を追加" else "機密情報を編集") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -559,6 +561,8 @@ private fun SecretDialog(
                         label = { Text(if (auth == AuthType.BIOMETRIC) "回復パスワード（12文字以上）" else "保護パスワード") },
                         visualTransformation = PasswordVisualTransformation()
                     )
+                    OutlinedTextField(confirmation, { confirmation = it },
+                        label = { Text("パスワードの確認") }, visualTransformation = PasswordVisualTransformation())
                 }
                 if (auth == AuthType.BIOMETRIC) Text("指紋の再登録で鍵が無効になった場合は、このパスワードで解除できます。端末外バックアップも作成してください。")
                 if (auth != AuthType.NONE) PasswordStrength.warning(password)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -567,11 +571,11 @@ private fun SecretDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onSave(SecretDraft(name.trim(), value, hidden, auth, password)) { error = it } },
-                enabled = name.isNotBlank() && value.isNotBlank() && (auth != AuthType.PASSWORD || password.isNotBlank()) && (auth != AuthType.BIOMETRIC || password.length >= 12)
+                onClick = { saving = true; onSave(SecretDraft(name.trim(), value, hidden, auth, password)) { error = it; saving = false } },
+                enabled = !saving && (auth == AuthType.NONE || password == confirmation) && name.isNotBlank() && value.isNotBlank() && (auth != AuthType.PASSWORD || password.isNotBlank()) && (auth != AuthType.BIOMETRIC || password.length >= 12)
             ) { Text("保存") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } }
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !saving) { Text("キャンセル") } }
     )
 }
 
