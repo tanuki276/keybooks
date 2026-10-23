@@ -3,6 +3,8 @@ package com.tanuki276.keybooks.security
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.security.keystore.StrongBoxUnavailableException
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -26,14 +28,14 @@ class CryptoManager {
     fun encryptWithoutAuthentication(value: String): EncryptedPayload {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateStandardKey())
-        return EncryptedPayload(cipher.doFinal(value.toByteArray(Charsets.UTF_8)), cipher.iv)
+        return EncryptedPayload(Envelope.encrypt(cipher, value), cipher.iv)
     }
 
     fun decryptWithoutAuthentication(encryptedValue: ByteArray, iv: ByteArray): String {
         requireValidIv(iv)
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, getOrCreateStandardKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
-        return cipher.doFinal(encryptedValue).toString(Charsets.UTF_8)
+        return Envelope.decrypt(cipher, encryptedValue)
     }
 
     /**
@@ -61,20 +63,27 @@ class CryptoManager {
         return cipher.doFinal(encryptedValue).toString(Charsets.UTF_8)
     }
 
-    fun newBiometricEncryptCipher(): Cipher = Cipher.getInstance(TRANSFORMATION).apply {
-        init(Cipher.ENCRYPT_MODE, getOrCreateBiometricKey())
+    fun newBiometricEncryptCipher(): Cipher {
+        fun create() = Cipher.getInstance(TRANSFORMATION).apply {
+            init(Cipher.ENCRYPT_MODE, getOrCreateBiometricKey(NEW_BIOMETRIC_KEY_ALIAS))
+        }
+        return try { create() } catch (_: KeyPermanentlyInvalidatedException) {
+            // All entries under this alias already require their recovery password.
+            keyStore.deleteEntry(NEW_BIOMETRIC_KEY_ALIAS)
+            create()
+        }
     }
 
-    fun newBiometricDecryptCipher(iv: ByteArray): Cipher = Cipher.getInstance(TRANSFORMATION).apply {
+    fun newBiometricDecryptCipher(iv: ByteArray, envelope: Boolean = false): Cipher = Cipher.getInstance(TRANSFORMATION).apply {
         requireValidIv(iv)
-        init(Cipher.DECRYPT_MODE, getOrCreateBiometricKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+        init(Cipher.DECRYPT_MODE, getOrCreateBiometricKey(if (envelope) NEW_BIOMETRIC_KEY_ALIAS else BIOMETRIC_KEY_ALIAS), GCMParameterSpec(GCM_TAG_BITS, iv))
     }
 
     fun encryptWithAuthenticatedCipher(cipher: Cipher, value: String): EncryptedPayload =
-        EncryptedPayload(cipher.doFinal(value.toByteArray(Charsets.UTF_8)), cipher.iv)
+        EncryptedPayload(Envelope.encrypt(cipher, value), cipher.iv)
 
     fun decryptWithAuthenticatedCipher(cipher: Cipher, encryptedValue: ByteArray): String =
-        cipher.doFinal(encryptedValue).toString(Charsets.UTF_8)
+        Envelope.decrypt(cipher, encryptedValue)
 
     fun encryptWithPassword(value: String, password: String): EncryptedPayload {
         require(password.isNotBlank()) { "Password must not be blank" }
@@ -82,7 +91,7 @@ class CryptoManager {
         val key = derivePasswordKey(password, salt)
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key)
-        return EncryptedPayload(cipher.doFinal(value.toByteArray(Charsets.UTF_8)), cipher.iv, salt)
+        return EncryptedPayload(Envelope.encrypt(cipher, value), cipher.iv, salt)
     }
 
     fun decryptWithPassword(
@@ -99,7 +108,7 @@ class CryptoManager {
             derivePasswordKey(password, salt),
             GCMParameterSpec(GCM_TAG_BITS, iv)
         )
-        return cipher.doFinal(encryptedValue).toString(Charsets.UTF_8)
+        return Envelope.decrypt(cipher, encryptedValue)
     }
 
     private fun getOrCreateStandardKey(): SecretKey =
@@ -113,24 +122,21 @@ class CryptoManager {
         if (existing != null) return existing.secretKey
 
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-        generator.init(
-            KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(AES_KEY_BITS)
-                .setRandomizedEncryptionRequired(true)
-                .build()
-        )
-        return generator.generateKey()
+        val builder = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(AES_KEY_BITS)
+            .setRandomizedEncryptionRequired(true)
+        return generateKey(generator, builder)
     }
 
-    private fun getOrCreateBiometricKey(): SecretKey {
-        val existing = keyStore.getEntry(BIOMETRIC_KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
+    private fun getOrCreateBiometricKey(alias: String): SecretKey {
+        val existing = keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry
         if (existing != null) return existing.secretKey
 
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
         val builder = KeyGenParameterSpec.Builder(
-            BIOMETRIC_KEY_ALIAS,
+            alias,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
         )
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
@@ -147,8 +153,17 @@ class CryptoManager {
             builder.setUserAuthenticationValidityDurationSeconds(-1)
         }
 
-        generator.init(builder.build())
-        return generator.generateKey()
+        return generateKey(generator, builder)
+    }
+
+    private fun generateKey(generator: KeyGenerator, builder: KeyGenParameterSpec.Builder): SecretKey {
+        try {
+            generator.init(builder.setIsStrongBoxBacked(true).build())
+            return generator.generateKey()
+        } catch (_: StrongBoxUnavailableException) {
+            generator.init(builder.setIsStrongBoxBacked(false).build())
+            return generator.generateKey()
+        }
     }
 
     private fun derivePasswordKey(password: String, salt: ByteArray): SecretKey {
@@ -172,6 +187,7 @@ class CryptoManager {
     companion object {
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val STANDARD_KEY_ALIAS = "keybooks_standard_v2"
+        private const val NEW_BIOMETRIC_KEY_ALIAS = "keybooks_biometric_envelope_v1"
         private const val BIOMETRIC_KEY_ALIAS = "keybooks_biometric_v2"
         private const val METADATA_KEY_ALIAS = "keybooks_metadata_v1"
         private const val METADATA_AAD_PREFIX = "keybooks:metadata:"

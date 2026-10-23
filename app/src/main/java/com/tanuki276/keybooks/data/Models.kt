@@ -28,7 +28,8 @@ data class SecretItem(
     val hidden: Boolean,
     val authType: AuthType,
     val passwordSalt: ByteArray?,
-    val createdAt: Long
+    val createdAt: Long,
+    val recovery: com.tanuki276.keybooks.security.EncryptedPayload? = null
 )
 
 data class ServiceBundle(

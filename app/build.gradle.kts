@@ -8,6 +8,7 @@ android {
     compileSdk = 37
 
     defaultConfig {
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         applicationId = "com.tanuki276.keybooks"
         minSdk = 28
         targetSdk = 37
@@ -39,6 +40,9 @@ android {
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
     implementation(composeBom)
 
     implementation("androidx.core:core-ktx:1.19.1")
