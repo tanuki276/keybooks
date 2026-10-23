@@ -30,9 +30,34 @@ class CryptoManager {
     }
 
     fun decryptWithoutAuthentication(encryptedValue: ByteArray, iv: ByteArray): String {
-        require(iv.size == GCM_IV_BYTES) { "Invalid IV" }
+        requireValidIv(iv)
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, getOrCreateStandardKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+        return cipher.doFinal(encryptedValue).toString(Charsets.UTF_8)
+    }
+
+    /**
+     * Encrypts metadata with a key that is deliberately separate from secret-value keys.
+     * associatedData is authenticated (not encrypted) and domain-separates metadata fields.
+     */
+    fun encryptMetadata(value: String, associatedData: String): EncryptedPayload {
+        require(associatedData.startsWith(METADATA_AAD_PREFIX)) { "Invalid metadata AAD" }
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateMetadataKey())
+        cipher.updateAAD(associatedData.toByteArray(Charsets.UTF_8))
+        return EncryptedPayload(cipher.doFinal(value.toByteArray(Charsets.UTF_8)), cipher.iv)
+    }
+
+    fun decryptMetadata(
+        encryptedValue: ByteArray,
+        iv: ByteArray,
+        associatedData: String
+    ): String {
+        requireValidIv(iv)
+        require(associatedData.startsWith(METADATA_AAD_PREFIX)) { "Invalid metadata AAD" }
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.DECRYPT_MODE, getOrCreateMetadataKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+        cipher.updateAAD(associatedData.toByteArray(Charsets.UTF_8))
         return cipher.doFinal(encryptedValue).toString(Charsets.UTF_8)
     }
 
@@ -41,7 +66,7 @@ class CryptoManager {
     }
 
     fun newBiometricDecryptCipher(iv: ByteArray): Cipher = Cipher.getInstance(TRANSFORMATION).apply {
-        require(iv.size == GCM_IV_BYTES) { "Invalid IV" }
+        requireValidIv(iv)
         init(Cipher.DECRYPT_MODE, getOrCreateBiometricKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
     }
 
@@ -60,20 +85,36 @@ class CryptoManager {
         return EncryptedPayload(cipher.doFinal(value.toByteArray(Charsets.UTF_8)), cipher.iv, salt)
     }
 
-    fun decryptWithPassword(encryptedValue: ByteArray, iv: ByteArray, salt: ByteArray, password: String): String {
-        require(iv.size == GCM_IV_BYTES) { "Invalid IV" }
+    fun decryptWithPassword(
+        encryptedValue: ByteArray,
+        iv: ByteArray,
+        salt: ByteArray,
+        password: String
+    ): String {
+        requireValidIv(iv)
         require(salt.size == PASSWORD_SALT_BYTES) { "Invalid salt" }
         val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.DECRYPT_MODE, derivePasswordKey(password, salt), GCMParameterSpec(GCM_TAG_BITS, iv))
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            derivePasswordKey(password, salt),
+            GCMParameterSpec(GCM_TAG_BITS, iv)
+        )
         return cipher.doFinal(encryptedValue).toString(Charsets.UTF_8)
     }
 
-    private fun getOrCreateStandardKey(): SecretKey {
-        val existing = keyStore.getEntry(STANDARD_KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
+    private fun getOrCreateStandardKey(): SecretKey =
+        getOrCreateUnauthenticatedKey(STANDARD_KEY_ALIAS)
+
+    private fun getOrCreateMetadataKey(): SecretKey =
+        getOrCreateUnauthenticatedKey(METADATA_KEY_ALIAS)
+
+    private fun getOrCreateUnauthenticatedKey(alias: String): SecretKey {
+        val existing = keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry
         if (existing != null) return existing.secretKey
+
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
         generator.init(
-            KeyGenParameterSpec.Builder(STANDARD_KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+            KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(AES_KEY_BITS)
@@ -88,7 +129,10 @@ class CryptoManager {
         if (existing != null) return existing.secretKey
 
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-        val builder = KeyGenParameterSpec.Builder(BIOMETRIC_KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+        val builder = KeyGenParameterSpec.Builder(
+            BIOMETRIC_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(AES_KEY_BITS)
@@ -111,16 +155,26 @@ class CryptoManager {
         val spec = PBEKeySpec(password.toCharArray(), salt, PBKDF2_ITERATIONS, AES_KEY_BITS)
         return try {
             val bytes = SecretKeyFactory.getInstance(PBKDF2_ALGORITHM).generateSecret(spec).encoded
-            SecretKeySpec(bytes, "AES")
+            try {
+                SecretKeySpec(bytes, "AES")
+            } finally {
+                bytes.fill(0)
+            }
         } finally {
             spec.clearPassword()
         }
+    }
+
+    private fun requireValidIv(iv: ByteArray) {
+        require(iv.size == GCM_IV_BYTES) { "Invalid IV" }
     }
 
     companion object {
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val STANDARD_KEY_ALIAS = "keybooks_standard_v2"
         private const val BIOMETRIC_KEY_ALIAS = "keybooks_biometric_v2"
+        private const val METADATA_KEY_ALIAS = "keybooks_metadata_v1"
+        private const val METADATA_AAD_PREFIX = "keybooks:metadata:"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
         private const val GCM_IV_BYTES = 12
