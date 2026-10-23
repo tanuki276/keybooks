@@ -19,8 +19,8 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         SecurityPolicy.hardenWindow(window)
 
-        val database = KeybooksDatabase(this)
         val cryptoManager = CryptoManager()
+        val database = KeybooksDatabase(this, cryptoManager)
         val biometricGate = BiometricGate(this)
         val appPreferences = AppPreferences(this)
 
