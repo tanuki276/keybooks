@@ -166,4 +166,4 @@ Project, service, and secret names can be edited. Values/authentication can be e
 
 ## Checks
 
-CI runs `gradle :app:assembleDebug :app:testDebugUnitTest :app:lintDebug` on every push and pull request (JDK 17, Gradle 9.8.2, Android SDK 36). A separate emulator job runs database integrity, CRUD/cascade, and atomic import tests. JVM tests cover backup wrong passwords, salt/header/IV/ciphertext/tag tampering, truncation/size limits, envelope corruption, legacy compatibility, and randomization. Hardware biometric enrollment, StrongBox, real document providers, and process-death recovery still need physical-device testing.
+CI runs `gradle :app:assembleDebug :app:testDebugUnitTest :app:lintDebug` on every push and pull request (JDK 17, Gradle 9.8.2, Android SDK 37.1). A separate emulator job runs database integrity, CRUD/cascade, and atomic import tests. JVM tests cover backup wrong passwords, salt/header/IV/ciphertext/tag tampering, truncation/size limits, envelope corruption, legacy compatibility, and randomization. Hardware biometric enrollment, StrongBox, real document providers, and process-death recovery still need physical-device testing.

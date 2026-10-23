@@ -341,6 +341,7 @@ private fun SecretRow(
     onEdit: (SecretDraft, () -> Unit, (String) -> Unit) -> Unit
 ) {
     val context = LocalContext.current
+    val currentEpoch by rememberUpdatedState(maskEpoch)
     var recoveryMode by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
     var value by remember(secret) { mutableStateOf<String?>(null) }
@@ -358,6 +359,7 @@ private fun SecretRow(
     fun reveal() {
         if (!secret.readable) { error = "鍵の消失または改ざんを検出しました。設定からバックアップを復元してください。"; return }
         error = null
+        val requestedEpoch = maskEpoch
         when (secret.authType) {
             AuthType.NONE -> runCatching {
                 cryptoManager.decryptWithoutAuthentication(secret.encryptedValue, secret.iv)
@@ -373,7 +375,7 @@ private fun SecretRow(
                     title = secret.name,
                     onSuccess = { authenticated ->
                         runCatching { cryptoManager.decryptWithAuthenticatedCipher(authenticated, secret.encryptedValue) }
-                            .onSuccess { value = it }
+                            .onSuccess { if (currentEpoch == requestedEpoch) value = it }
                             .onFailure { error = "復号できません。データ破損または鍵の消失が考えられます。設定からバックアップを復元してください。" }
                     },
                     onError = { error = it }
@@ -460,7 +462,7 @@ private fun SettingsDialog(
         onDismissRequest = onDismiss,
         title = { Text("設定") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 TextButton(onClick = onBackup) { Text("暗号化Export / Import") }
                 Text("端末故障・アンインストールに備え、バックアップを端末外へ保存してください。生体認証の再登録前にもExportしてください。")
                 Text("クリップボード自動消去")
@@ -596,7 +598,7 @@ private fun PasswordDialog(onDismiss: () -> Unit, onSubmit: (String, () -> Unit)
                     label = { Text("パスワード") },
                     visualTransformation = PasswordVisualTransformation()
                 )
-                if (wrong) Text("パスワードが違います", color = MaterialTheme.colorScheme.error)
+                if (wrong) Text("パスワードが違うか、データが破損しています。バックアップからの復元も確認してください。", color = MaterialTheme.colorScheme.error)
             }
         },
         confirmButton = { Button(onClick = { onSubmit(password) { wrong = true } }, enabled = password.isNotBlank()) { Text("解除") } },

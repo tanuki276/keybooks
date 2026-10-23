@@ -122,7 +122,10 @@ internal fun BackupDialog(database: KeybooksDatabase, crypto: CryptoManager, bio
                                     output.toByteArray()
                                 } ?: error("ファイルを開けません")
                                 val plaintext = try { PortableCrypto.open(bytes, supplied) } finally { bytes.fill(0) }
-                                try { database.importPortable(plaintext.toString(Charsets.UTF_8), supplied) }
+                                try {
+                                    val operationContext = currentCoroutineContext()
+                                    database.importPortable(plaintext.toString(Charsets.UTF_8), supplied) { operationContext.ensureActive() }
+                                }
                                 finally { plaintext.fill(0) }
                             }
                             password = ""; confirmation = ""; importUri = null

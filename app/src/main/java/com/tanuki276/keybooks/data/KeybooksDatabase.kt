@@ -141,7 +141,7 @@ class KeybooksDatabase(
     }
 
     /** Authenticated, fully validated before any persistent mutation. Import merges without deleting existing data. */
-    fun importPortable(text: String, password: String) {
+    fun importPortable(text: String, password: String, checkActive: () -> Unit = {}) {
         val root = JSONObject(text)
         require(root.getInt("version") == 1)
         val projects = root.getJSONArray("projects")
@@ -149,9 +149,12 @@ class KeybooksDatabase(
         // Parse the complete document before writing; limits also prevent pathological nesting/record counts.
         var count = 0
         for (i in 0 until projects.length()) {
+            checkActive()
             val project = projects.getJSONObject(i)
             require(project.getString("name").isNotBlank())
             val services = project.getJSONArray("services")
+            count += 1 + services.length()
+            require(count <= 10_000)
             for (j in 0 until services.length()) {
                 val service = services.getJSONObject(j)
                 require(service.getString("name").isNotBlank())
@@ -169,7 +172,8 @@ class KeybooksDatabase(
         db.beginTransaction()
         try {
             for (i in 0 until projects.length()) {
-                val project = projects.getJSONObject(i)
+                checkActive()
+            val project = projects.getJSONObject(i)
                 val projectId = insertProject(project.getString("name"))
                 val services = project.getJSONArray("services")
                 for (j in 0 until services.length()) {
@@ -177,6 +181,7 @@ class KeybooksDatabase(
                     val serviceId = insertService(projectId, service.getString("name"))
                     val secrets = service.getJSONArray("secrets")
                     for (k in 0 until secrets.length()) {
+                        checkActive()
                         val secret = secrets.getJSONObject(k)
                         val payload = cryptoManager.encryptWithPassword(secret.getString("value"), password)
                         insertSecret(serviceId, secret.getString("name"), payload.encryptedValue, payload.iv,
@@ -184,6 +189,7 @@ class KeybooksDatabase(
                     }
                 }
             }
+            checkActive()
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
     }
